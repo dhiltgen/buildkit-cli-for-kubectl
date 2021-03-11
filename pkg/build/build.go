@@ -537,6 +537,8 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiNodeMultiPlatform boo
 			return nil, nil, notSupported(d, driver.MultiPlatform)
 		}
 		so.FrontendAttrs["platform"] = strings.Join(pp, ",")
+	} else {
+		fmt.Printf("XXX no specified platforms - TODO should default to what's available in a mixed cluster")
 	}
 
 	// setup networkmode
