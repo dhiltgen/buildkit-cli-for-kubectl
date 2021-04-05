@@ -19,6 +19,7 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/platforms"
+	"github.com/sirupsen/logrus"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/driver"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/imagetools"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/progress"
@@ -363,6 +364,8 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		return nil, err
 	}
 	drvPlatforms, mixed := drvInfo.GetPlatforms()
+	logrus.Infof("XXX driver supported platforms: %#v %v", drvPlatforms, mixed)
+
 	// Check for "auto" special case
 	for _, platform := range opt.Platforms {
 		if strings.EqualFold(platform.Architecture, "auto") {
@@ -452,7 +455,9 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 	errGroup.Go(func() error {
 		pw := multiWriter.WithPrefix("default", false)
 		defer close(pw.Status())
+		logrus.Infof("XXX about to wait for %d routines to finish up", solveCount)
 		wg.Wait()
+		logrus.Infof("XXX all %d routines are finished", solveCount)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -569,6 +574,7 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		}
 
 		errGroup.Go(func() error {
+			logrus.Infof("XXX in go routine that will defer decrementing the wait group")
 			defer wg.Done()
 			// TODO - make sure we don't have a stack goof here and pass in the wrong solveOpt...
 			rr, err := c.Solve(ctx, nil, *solveOpt, statusCh)

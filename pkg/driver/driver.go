@@ -92,6 +92,7 @@ type Builder struct {
 
 type Node struct {
 	Name      string
+	NodeName  string
 	Status    string
 	Platforms []specs.Platform
 }

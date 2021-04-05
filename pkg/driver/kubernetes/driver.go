@@ -507,13 +507,40 @@ func (d *Driver) List(ctx context.Context) ([]driver.Builder, error) {
 			return nil, err
 		}
 		for _, p := range pods {
+			// TODO DRY this out with the driver.Client routine...
+			restClient := d.clientset.CoreV1().RESTClient()
+			restClientConfig, err := d.KubeClientConfig.ClientConfig()
+			if err != nil {
+				return nil, err
+			}
+			containerName := p.Spec.Containers[0].Name
+			cmd := []string{"buildctl", "dial-stdio"}
+			conn, err := execconn.ExecConn(restClient, restClientConfig,
+				p.Namespace, p.Name, containerName, cmd)
+			if err != nil {
+				return nil, err
+			}
+			client, err := client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
+				return conn, nil
+			}))
+			var platforms []specs.Platform
+			workers, err := client.ListWorkers(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if len(workers) == 1 {
+				platforms = workers[0].Platforms
+			} else {
+				return nil, fmt.Errorf("Multi-worker scenario not yet implemented")
+			}
+
 			node := driver.Node{
 				// TODO this isn't ideal - Need a good way to translate between pod name and node hostname
-				//Name:   p.Spec.NodeName,
+				NodeName: p.Spec.NodeName,
 				//Name:   p.Status.HostIP,
-				Name:   p.Name,
-				Status: p.Status.Message, // TODO - this seems to be blank, need to look at kubectl CLI magic...
-				// Other fields are unset (TODO: detect real platforms)
+				Name:      p.Name,
+				Status:    string(p.Status.Phase),
+				Platforms: platforms,
 			}
 			builder.Nodes = append(builder.Nodes, node)
 		}
