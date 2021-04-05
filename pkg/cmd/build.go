@@ -366,7 +366,7 @@ Hints:
 	if v := os.Getenv("DOCKER_DEFAULT_PLATFORM"); v != "" {
 		platformsDefault = []string{v}
 	}
-	flags.StringArrayVar(&options.platforms, "platform", platformsDefault, "Set target platform for build")
+	flags.StringArrayVar(&options.platforms, "platform", platformsDefault, "Set target platform for build (use \"auto\" to build all available native architectures)")
 
 	flags.StringArrayVar(&options.secrets, "secret", []string{}, "Secret file to expose to the build: id=mysecret,src=/local/secret")
 

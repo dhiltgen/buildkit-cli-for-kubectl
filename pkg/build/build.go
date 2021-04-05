@@ -90,7 +90,7 @@ func toRepoOnly(in string) (string, error) {
 	return strings.Join(out, ","), nil
 }
 
-func toSolveOpt(ctx context.Context, d driver.Driver, multiPlatformRequested bool, opt Options, dl dockerLoadCallback) (*client.SolveOpt, func(), error) {
+func toSolveOpt(ctx context.Context, d driver.Driver, multiNodeRequested bool, opt Options, dl dockerLoadCallback) (*client.SolveOpt, func(), error) {
 	defers := make([]func(), 0, 2)
 	var err error
 	releaseF := func() {
@@ -106,7 +106,7 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiPlatformRequested boo
 	}()
 
 	if opt.ImageIDFile != "" {
-		if multiPlatformRequested || len(opt.Platforms) != 0 { // TODO the secondary test here will become redundant once multiPlatformRequested is complete
+		if multiNodeRequested || len(opt.Platforms) != 0 { // TODO the secondary test here will become redundant once multiPlatformRequested is complete
 			return nil, nil, errors.Errorf("image ID file cannot be specified when building for multiple platforms")
 		}
 		// Avoid leaving a stale file if we eventually fail
@@ -135,7 +135,7 @@ func toSolveOpt(ctx context.Context, d driver.Driver, multiPlatformRequested boo
 		solveOpt.FrontendAttrs["source"] = opt.FrontendImage
 	}
 
-	if multiPlatformRequested {
+	if multiNodeRequested {
 		// force creation of manifest list
 		solveOpt.FrontendAttrs["multi-platform"] = "true"
 	}
@@ -356,8 +356,42 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		return nil, err
 	}
 
+	drvInfo, err := drv.Info(ctx)
+	if err != nil {
+		close(pw.Status())
+		<-pw.Done()
+		return nil, err
+	}
+	drvPlatforms, mixed := drvInfo.GetPlatforms()
+	// Check for "auto" special case
+	for _, platform := range opt.Platforms {
+		if strings.EqualFold(platform.Architecture, "auto") {
+			opt.Platforms = drvPlatforms
+			break
+		}
+	}
+
 	// Determine if we want to build a manifestlist based image, or a simple/plain image
+	// There are a few scenarios that can lead to this.
+	// * If the user specifies multiple explicit platforms
+	// * If the user specifies "auto" as the platform, and the driver nodes support multiples
 	multiPlatformRequested := len(opt.Platforms) > 1
+
+	// Determine if we want to split the build into multiple builder requests, or send to a single builder
+	multiNodeRequested := multiPlatformRequested && mixed // TODO - consider refining this algorithm...
+
+	// Determine the number of Solve calls we will perform
+	solveCount := 1
+	if multiNodeRequested {
+		solveCount = len(opt.Platforms)
+	}
+
+	requestedPlatforms := make([]specs.Platform, len(opt.Platforms))
+	for i, platform := range opt.Platforms {
+		requestedPlatforms[i] = platform
+	}
+
+	// TODO - come back to this and make sure it's legit...
 	defers := make([]func(), 0, 2)
 	defer func() {
 		if err != nil {
@@ -368,41 +402,50 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 	}()
 
 	var auth imagetools.Auth
+	driverName := drv.GetName()
 
 	multiWriter := progress.NewMultiWriter(pw)
 	errGroup, ctx := errgroup.WithContext(ctx)
-	driverName := drv.GetName()
+
+	solveOpts := make([]*client.SolveOpt, solveCount)
+	res := make([]*client.SolveResponse, solveCount)
 
 	if auth == nil {
 		auth = drv.GetAuthWrapper(registrySecretName)
 		opt.Session = append(opt.Session, drv.GetAuthProvider(registrySecretName, os.Stderr))
 	}
-	solveOpt, release, err := toSolveOpt(ctx, drv, multiPlatformRequested, opt, func(arg string) (io.WriteCloser, func(), error) {
-		// Set up loader based on first found type (only 1 supported)
-		for _, entry := range opt.Exports {
-			if entry.Type == "docker" {
-				return newDockerLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
-			} else if entry.Type == "oci" {
-				return newContainerdLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
-			}
+
+	for i := 0; i < len(solveOpts); i++ {
+		// If we're multi-node, swap out the platform list for one platform at a time
+		if multiNodeRequested {
+			opt.Platforms = []specs.Platform{requestedPlatforms[i]}
 		}
-		// TODO - Push scenario?  (or is this a "not reached" scenario now?)
-		return nil, nil, fmt.Errorf("raw push scenario not yet supported")
-	})
-	if err != nil {
-		return nil, err
+		solveOpt, release, err := toSolveOpt(ctx, drv, multiNodeRequested, opt, func(arg string) (io.WriteCloser, func(), error) {
+			// Set up loader based on first found type (only 1 supported)
+			for _, entry := range opt.Exports {
+				if entry.Type == "docker" {
+					return newDockerLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
+				} else if entry.Type == "oci" {
+					return newContainerdLoader(ctx, drv, kubeClientConfig, driverName, multiWriter)
+				}
+			}
+			// TODO - Push scenario?  (or is this a "not reached" scenario now?)
+			return nil, nil, fmt.Errorf("raw push scenario not yet supported")
+		})
+		if err != nil {
+			return nil, err
+		}
+		defers = append(defers, release)
+		solveOpts[i] = solveOpt
 	}
-	defers = append(defers, release)
 
 	var respMu sync.Mutex
 
 	// TODO this is WRONG
 	multiTarget := false // TODO experiment with true/false on this to see differing behavior of the progress writer...
 
-	// TODO the length on this should match the number of nodes/platforms we're targeting
-	res := make([]*client.SolveResponse, 1)
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
+	wg.Add(solveCount)
 
 	var pushNames string
 
@@ -420,11 +463,13 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		resp = res[0]
 		respMu.Unlock()
 		if len(res) == 1 {
+			// TODO - this is the single solve scenario
 			if opt.ImageIDFile != "" {
 				return ioutil.WriteFile(opt.ImageIDFile, []byte(res[0].ExporterResponse["containerimage.digest"]), 0644)
 			}
 			return nil
 		}
+		// TODO - this is the multi-solve scenario (aka, multiple nodes building, where the client needs to stitch things together)
 
 		if pushNames != "" {
 			progress.Write(pw, fmt.Sprintf("merging manifest list %s", pushNames), func() error {
@@ -481,64 +526,66 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		return nil
 	})
 
-	// TODO - this probably needs some refinement for multi-arch multi-node vs. single node multi-arch via cross compilation
-	if multiPlatformRequested {
-		for i, exportEntry := range solveOpt.Exports {
-			switch exportEntry.Type {
-			case "oci", "tar":
-				return nil, errors.Errorf("%s for multi-node builds currently not supported", exportEntry.Type)
-			case "image":
-				if pushNames == "" && exportEntry.Attrs["push"] != "" {
-					if ok, _ := strconv.ParseBool(exportEntry.Attrs["push"]); ok {
-						pushNames = exportEntry.Attrs["name"]
-						if pushNames == "" {
-							return nil, errors.Errorf("tag is needed when pushing to registry")
+	for i, solveOpt := range solveOpts {
+		// TODO - this probably needs some refinement for multi-arch multi-node vs. single node multi-arch via cross compilation
+		if multiPlatformRequested {
+			for _, exportEntry := range solveOpt.Exports {
+				switch exportEntry.Type {
+				case "oci", "tar":
+					return nil, errors.Errorf("%s for multi-node builds currently not supported", exportEntry.Type)
+				case "image":
+					if pushNames == "" && exportEntry.Attrs["push"] != "" {
+						if ok, _ := strconv.ParseBool(exportEntry.Attrs["push"]); ok {
+							pushNames = exportEntry.Attrs["name"]
+							if pushNames == "" {
+								return nil, errors.Errorf("tag is needed when pushing to registry")
+							}
+							names, err := toRepoOnly(exportEntry.Attrs["name"])
+							if err != nil {
+								return nil, err
+							}
+							exportEntry.Attrs["name"] = names
+							exportEntry.Attrs["push-by-digest"] = "true"
+							solveOpt.Exports[i].Attrs = exportEntry.Attrs
 						}
-						names, err := toRepoOnly(exportEntry.Attrs["name"])
-						if err != nil {
-							return nil, err
-						}
-						exportEntry.Attrs["name"] = names
-						exportEntry.Attrs["push-by-digest"] = "true"
-						solveOpt.Exports[i].Attrs = exportEntry.Attrs
 					}
 				}
 			}
 		}
-	}
 
-	pw = multiWriter.WithPrefix("prefixhere", multiTarget)
+		pw = multiWriter.WithPrefix("default", multiTarget)
 
-	// TODO this needs further work around picking the right nodes...
-	c := drvClient
+		// TODO this needs further work around picking the right nodes...
+		c := drvClient
 
-	var statusCh chan *client.SolveStatus
-	if pw != nil {
-		pw = progress.ResetTime(pw)
-		statusCh = pw.Status()
+		var statusCh chan *client.SolveStatus
+		if pw != nil {
+			pw = progress.ResetTime(pw)
+			statusCh = pw.Status()
+			errGroup.Go(func() error {
+				<-pw.Done()
+				return pw.Err()
+			})
+		}
+
 		errGroup.Go(func() error {
-			<-pw.Done()
-			return pw.Err()
+			defer wg.Done()
+			// TODO - make sure we don't have a stack goof here and pass in the wrong solveOpt...
+			rr, err := c.Solve(ctx, nil, *solveOpt, statusCh)
+			if err != nil {
+				// Try to give a slightly more helpful error message if the use
+				// hasn't wired up a kubernetes secret for push/pull properly
+				if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
+					msg := drv.GetAuthHintMessage()
+					return errors.Wrap(err, msg)
+				}
+				return err
+			}
+			// TODO - resp and res are likely still not quite right...
+			res[i] = rr
+			return nil
 		})
 	}
-
-	errGroup.Go(func() error {
-		defer wg.Done()
-		rr, err := c.Solve(ctx, nil, *solveOpt, statusCh)
-		if err != nil {
-			// Try to give a slightly more helpful error message if the use
-			// hasn't wired up a kubernetes secret for push/pull properly
-			if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
-				msg := drv.GetAuthHintMessage()
-				return errors.Wrap(err, msg)
-			}
-			return err
-		}
-		// TODO this should index properly for the number of platforms we're building for
-		res[0] = rr
-		return nil
-	})
-
 	if err := errGroup.Wait(); err != nil {
 		return nil, err
 	}
