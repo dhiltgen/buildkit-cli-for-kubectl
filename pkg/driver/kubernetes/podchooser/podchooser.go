@@ -9,6 +9,9 @@ import (
 	"sort"
 	"time"
 
+	"github.com/containerd/containerd/platforms"
+	"github.com/moby/buildkit/client"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/serialx/hashring"
 	"github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,7 +21,11 @@ import (
 )
 
 type PodChooser interface {
-	ChoosePod(ctx context.Context) (*corev1.Pod, error)
+	ChoosePod(ctx context.Context, drv ClientAccess, platformList ...specs.Platform) (*corev1.Pod, error)
+}
+
+type ClientAccess interface {
+	GetClientForPod(context.Context, *corev1.Pod) (*client.Client, error)
 }
 
 type RandomPodChooser struct {
@@ -27,13 +34,17 @@ type RandomPodChooser struct {
 	Deployment *appsv1.Deployment
 }
 
-func (pc *RandomPodChooser) ChoosePod(ctx context.Context) (*corev1.Pod, error) {
+func (pc *RandomPodChooser) ChoosePod(ctx context.Context, drv ClientAccess, platformList ...specs.Platform) (*corev1.Pod, error) {
 	pods, err := ListRunningPods(ctx, pc.PodClient, pc.Deployment)
 	if err != nil {
 		return nil, err
 	}
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("no builder pods are running")
+	}
+	pods, err = FilterPods(ctx, drv, pods, platformList)
+	if err != nil {
+		return nil, err
 	}
 	randSource := pc.RandSource
 	if randSource == nil {
@@ -51,8 +62,12 @@ type StickyPodChooser struct {
 	Deployment *appsv1.Deployment
 }
 
-func (pc *StickyPodChooser) ChoosePod(ctx context.Context) (*corev1.Pod, error) {
+func (pc *StickyPodChooser) ChoosePod(ctx context.Context, drv ClientAccess, platformList ...specs.Platform) (*corev1.Pod, error) {
 	pods, err := ListRunningPods(ctx, pc.PodClient, pc.Deployment)
+	if err != nil {
+		return nil, err
+	}
+	pods, err = FilterPods(ctx, drv, pods, platformList)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +86,7 @@ func (pc *StickyPodChooser) ChoosePod(ctx context.Context) (*corev1.Pod, error) 
 			PodClient:  pc.PodClient,
 			Deployment: pc.Deployment,
 		}
-		return rpc.ChoosePod(ctx)
+		return rpc.ChoosePod(ctx, drv, platformList...)
 	}
 	return podMap[chosen], nil
 }
@@ -106,4 +121,42 @@ func ListRunningPods(ctx context.Context, client clientcorev1.PodInterface, depl
 		return runningPods[i].Name < runningPods[j].Name
 	})
 	return runningPods, nil
+}
+
+// TODO - move this elsewhere...
+
+func FilterPods(ctx context.Context, drv ClientAccess, pods []*corev1.Pod, platformList []specs.Platform) ([]*corev1.Pod, error) {
+	// TODO - cache clients...
+
+	if len(platformList) == 0 {
+		return pods, nil
+	}
+	res := []*corev1.Pod{}
+	for _, pod := range pods {
+		client, err := drv.GetClientForPod(ctx, pod)
+		if err != nil {
+			return nil, err
+		}
+		workers, err := client.ListWorkers(ctx)
+		if len(workers) == 1 {
+			matched := false
+			for _, platform := range platformList {
+				for _, cmp := range workers[0].Platforms {
+					if platforms.Format(platform) == platforms.Format(cmp) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					break
+				}
+			}
+			if matched {
+				res = append(res, pod)
+			}
+		} else {
+			return nil, fmt.Errorf("Multi-worker scenario not yet implemented")
+		}
+	}
+	return res, nil
 }

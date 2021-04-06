@@ -67,7 +67,7 @@ type Driver interface {
 	Info(context.Context) (*Info, error)
 	Stop(ctx context.Context, force bool) error
 	Rm(ctx context.Context, force bool) error
-	Client(ctx context.Context) (*client.Client, string, error)
+	Client(ctx context.Context, platforms ...specs.Platform) (*client.Client, string, error)
 	Features() map[Feature]bool
 	List(ctx context.Context) ([]Builder, error)
 	RuntimeSockProxy(ctx context.Context, name string) (net.Conn, error)

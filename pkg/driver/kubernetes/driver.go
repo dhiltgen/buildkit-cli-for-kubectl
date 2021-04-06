@@ -410,30 +410,36 @@ func (d *Driver) Rm(ctx context.Context, force bool) error {
 	return nil
 }
 
-func (d *Driver) Client(ctx context.Context) (*client.Client, string, error) {
-	restClient := d.clientset.CoreV1().RESTClient()
-	restClientConfig, err := d.KubeClientConfig.ClientConfig()
+func (d *Driver) Client(ctx context.Context, platforms ...specs.Platform) (*client.Client, string, error) {
+	pod, err := d.podChooser.ChoosePod(ctx, d, platforms...)
 	if err != nil {
 		return nil, "", err
 	}
-	pod, err := d.podChooser.ChoosePod(ctx)
-	if err != nil {
-		return nil, "", err
-	}
+	client, err := d.GetClientForPod(ctx, pod)
+	logrus.Infof("XXX pod %s chosen for platform %v", pod.Name, platforms)
+	return client, pod.Name, err
+}
+
+func (d *Driver) GetClientForPod(ctx context.Context, pod *corev1.Pod) (*client.Client, error) {
 	if len(pod.Spec.Containers) == 0 {
-		return nil, "", errors.Errorf("pod %s does not have any container", pod.Name)
+		return nil, errors.Errorf("pod %s does not have any container", pod.Name)
 	}
+	restClient := d.clientset.CoreV1().RESTClient()
+	restClientConfig, err := d.InitConfig.KubeClientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+
 	containerName := pod.Spec.Containers[0].Name
 	cmd := []string{"buildctl", "dial-stdio"}
 	conn, err := execconn.ExecConn(restClient, restClientConfig,
 		pod.Namespace, pod.Name, containerName, cmd)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	client, err := client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
+	return client.New(ctx, "", client.WithDialer(func(string, time.Duration) (net.Conn, error) {
 		return conn, nil
 	}))
-	return client, pod.Name, err
 }
 
 // TODO debugging concurrent access problems
@@ -573,7 +579,7 @@ func (d *Driver) Features() map[driver.Feature]bool {
 	// Query the pod to figure out the runtime
 
 	// TODO how will this work for multi-pod deployments?
-	pod, err := d.podChooser.ChoosePod(context.TODO())
+	pod, err := d.podChooser.ChoosePod(context.TODO(), d)
 	if err == nil && len(pod.Spec.Containers) > 0 && !isRootless(pod.ObjectMeta.Labels["rootless"]) {
 		switch pod.ObjectMeta.Labels["runtime"] {
 		case "containerd":

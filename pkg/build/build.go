@@ -531,8 +531,9 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		return nil
 	})
 
-	for i, solveOpt := range solveOpts {
+	for i, so := range solveOpts {
 		// TODO - this probably needs some refinement for multi-arch multi-node vs. single node multi-arch via cross compilation
+		solveOpt := so
 		if multiPlatformRequested {
 			for _, exportEntry := range solveOpt.Exports {
 				switch exportEntry.Type {
@@ -561,8 +562,19 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		pw = multiWriter.WithPrefix("default", multiTarget)
 
 		// TODO this needs further work around picking the right nodes...
-		c := drvClient
-
+		var c *client.Client
+		var name string
+		if multiNodeRequested {
+			// TODO refine algorithm to select node (spread work around, etc.)
+			c, name, err = drv.Client(ctx, requestedPlatforms[i])
+			if err != nil {
+				// TODO consider hardening for flaky builders
+				return nil, err
+			}
+			logrus.Infof("XXX [%d] client %#v on node %s chosen for platform %s", i, c, name, requestedPlatforms[i])
+		} else {
+			c = drvClient
+		}
 		var statusCh chan *client.SolveStatus
 		if pw != nil {
 			pw = progress.ResetTime(pw)
@@ -581,6 +593,7 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 			if err != nil {
 				// Try to give a slightly more helpful error message if the use
 				// hasn't wired up a kubernetes secret for push/pull properly
+				logrus.Infof("XXX failed to solve on %s - %s", name, err)
 				if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
 					msg := drv.GetAuthHintMessage()
 					return errors.Wrap(err, msg)
