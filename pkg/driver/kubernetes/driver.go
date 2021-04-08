@@ -416,7 +416,6 @@ func (d *Driver) Client(ctx context.Context, platforms ...specs.Platform) (*clie
 		return nil, "", err
 	}
 	client, err := d.GetClientForPod(ctx, pod)
-	logrus.Infof("XXX pod %s chosen for platform %v", pod.Name, platforms)
 	return client, pod.Name, err
 }
 

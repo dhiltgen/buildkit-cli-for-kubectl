@@ -42,7 +42,7 @@ func (pc *RandomPodChooser) ChoosePod(ctx context.Context, drv ClientAccess, pla
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("no builder pods are running")
 	}
-	pods, err = FilterPods(ctx, drv, pods, platformList)
+	pods, err = filterPods(ctx, drv, pods, platformList)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +67,7 @@ func (pc *StickyPodChooser) ChoosePod(ctx context.Context, drv ClientAccess, pla
 	if err != nil {
 		return nil, err
 	}
-	pods, err = FilterPods(ctx, drv, pods, platformList)
+	pods, err = filterPods(ctx, drv, pods, platformList)
 	if err != nil {
 		return nil, err
 	}
@@ -125,8 +125,12 @@ func ListRunningPods(ctx context.Context, client clientcorev1.PodInterface, depl
 
 // TODO - move this elsewhere...
 
-func FilterPods(ctx context.Context, drv ClientAccess, pods []*corev1.Pod, platformList []specs.Platform) ([]*corev1.Pod, error) {
-	// TODO - cache clients...
+func filterPods(ctx context.Context, drv ClientAccess, pods []*corev1.Pod, platformList []specs.Platform) ([]*corev1.Pod, error) {
+	// TODO - cache clients so we're not doing it multiple times...
+	// The driver should establish clients to the running builders, and hold them open, then recycle them
+	// and do so with a fairly short timeout so if we have a bad builder but others are OK, we can proceed with the build
+	// If the user is just pushing without multi-arch, one bad builder shouldn't break the system
+	// but we should warn if they're not pushing since we can't replicate properly
 
 	if len(platformList) == 0 {
 		return pods, nil

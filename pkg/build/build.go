@@ -19,7 +19,6 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/platforms"
-	"github.com/sirupsen/logrus"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/driver"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/imagetools"
 	"github.com/vmware-tanzu/buildkit-cli-for-kubectl/pkg/progress"
@@ -363,16 +362,23 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		<-pw.Done()
 		return nil, err
 	}
-	drvPlatforms, mixed := drvInfo.GetPlatforms()
-	logrus.Infof("XXX driver supported platforms: %#v %v", drvPlatforms, mixed)
+	_, mixed := drvInfo.GetPlatforms()
 
 	// Check for "auto" special case
-	for _, platform := range opt.Platforms {
-		if strings.EqualFold(platform.Architecture, "auto") {
-			opt.Platforms = drvPlatforms
-			break
+	// TODO - while this would be cool, in reality it doesn't work in practice
+	//        as most library images on hub don't have 386 binaries, so builds fail on x86
+	//        and they lack armv6, so ARM builds fail.
+	//        It might be possible to attempt and fall-back on well known errors for missing layers
+	//        or build a filter of some sorts for uncommon old architectures
+	//        or maybe there's a way to only build the latest platform
+	/*
+		for _, platform := range opt.Platforms {
+			if strings.EqualFold(platform.Architecture, "auto") {
+				opt.Platforms = drvPlatforms
+				break
+			}
 		}
-	}
+	*/
 
 	// Determine if we want to build a manifestlist based image, or a simple/plain image
 	// There are a few scenarios that can lead to this.
@@ -455,9 +461,7 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 	errGroup.Go(func() error {
 		pw := multiWriter.WithPrefix("default", false)
 		defer close(pw.Status())
-		logrus.Infof("XXX about to wait for %d routines to finish up", solveCount)
 		wg.Wait()
-		logrus.Infof("XXX all %d routines are finished", solveCount)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -479,7 +483,6 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		if pushNames != "" {
 			progress.Write(pw, fmt.Sprintf("merging manifest list %s", pushNames), func() error {
 				descs := make([]specs.Descriptor, 0, len(res))
-
 				for _, r := range res {
 					s, ok := r.ExporterResponse["containerimage.digest"]
 					if ok {
@@ -534,6 +537,7 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 	for i, so := range solveOpts {
 		// TODO - this probably needs some refinement for multi-arch multi-node vs. single node multi-arch via cross compilation
 		solveOpt := so
+		i := i
 		if multiPlatformRequested {
 			for _, exportEntry := range solveOpt.Exports {
 				switch exportEntry.Type {
@@ -559,8 +563,6 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 			}
 		}
 
-		pw = multiWriter.WithPrefix("default", multiTarget)
-
 		// TODO this needs further work around picking the right nodes...
 		var c *client.Client
 		var name string
@@ -571,10 +573,12 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 				// TODO consider hardening for flaky builders
 				return nil, err
 			}
-			logrus.Infof("XXX [%d] client %#v on node %s chosen for platform %s", i, c, name, requestedPlatforms[i])
 		} else {
 			c = drvClient
+			name = "default"
 		}
+		pw = multiWriter.WithPrefix(name, multiTarget)
+
 		var statusCh chan *client.SolveStatus
 		if pw != nil {
 			pw = progress.ResetTime(pw)
@@ -586,14 +590,12 @@ func Build(ctx context.Context, drv driver.Driver, opt Options, kubeClientConfig
 		}
 
 		errGroup.Go(func() error {
-			logrus.Infof("XXX in go routine that will defer decrementing the wait group")
 			defer wg.Done()
 			// TODO - make sure we don't have a stack goof here and pass in the wrong solveOpt...
 			rr, err := c.Solve(ctx, nil, *solveOpt, statusCh)
 			if err != nil {
 				// Try to give a slightly more helpful error message if the use
 				// hasn't wired up a kubernetes secret for push/pull properly
-				logrus.Infof("XXX failed to solve on %s - %s", name, err)
 				if strings.Contains(strings.ToLower(err.Error()), "401 unauthorized") {
 					msg := drv.GetAuthHintMessage()
 					return errors.Wrap(err, msg)

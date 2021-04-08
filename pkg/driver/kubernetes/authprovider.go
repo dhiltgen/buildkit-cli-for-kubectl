@@ -42,8 +42,17 @@ type authProvider struct {
 	// softFailure bool
 }
 
+// TODO unwind this abstraction...
 func (ap *authProvider) GetAuthConfig(registryHostname string) (imagetools.AuthConfig, error) {
-	return imagetools.AuthConfig{}, fmt.Errorf("GetAuthConfig not yet implemented for kube secrets")
+	res := imagetools.AuthConfig{}
+	credResponse, err := ap.Credentials(context.Background(), &auth.CredentialsRequest{Host: registryHostname})
+	if err != nil {
+		return res, err
+	}
+	res.Username = credResponse.Username
+	res.Password = credResponse.Secret
+
+	return res, nil
 }
 
 func (ap *authProvider) Register(server *grpc.Server) {
