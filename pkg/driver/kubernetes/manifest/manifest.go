@@ -94,6 +94,17 @@ func NewDeployment(opt *DeploymentOpt) (*appsv1.Deployment, error) {
 									MountPath: "/etc/buildkit/",
 								},
 							},
+							// TODO - wire this up so env vars can be driven from flags passed in during create
+							Env: []corev1.EnvVar{
+								{
+									Name:  "BUILDKIT_STEP_LOG_MAX_SIZE",
+									Value: "10485760", // 10MB (default 1MB)
+								},
+								{
+									Name:  "BUILDKIT_STEP_LOG_MAX_SPEED",
+									Value: "10485760", // 10 MB (default 1MB)
+								},
+							},
 						},
 					},
 					Volumes: []corev1.Volume{
